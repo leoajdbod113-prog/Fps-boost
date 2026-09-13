@@ -1,0 +1,970 @@
+--[[
+    NEXUS FPS BOOSTER V4
+    LocalScript - Roblox Studio
+
+    Novidades da V4:
+    • Anti-Lag (reduz distância de streaming/renderização)
+    • Desligar sons do jogo
+    • Modo "Só o Essencial" (esconde HUD/Chat/Backpack)
+    • Gráfico de FPS ao longo do tempo (aba INFO)
+    • Ping médio / mínimo / máximo
+    • Configurações salvas (via writefile/readfile, se o executor suportar)
+    • Botão de minimizar o painel
+    • Mantém: modos LOW/MEDIUM/HIGH/ULTRA/BATATA, RAM Cleaner, backup/restore
+]]
+
+--==================================================
+-- SERVICES
+--==================================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local Stats = game:GetService("Stats")
+local StarterGui = game:GetService("StarterGui")
+local SoundService = game:GetService("SoundService")
+local HttpService = game:GetService("HttpService")
+
+local Player = Players.LocalPlayer
+
+--==================================================
+-- COLORS
+--==================================================
+
+local PURPLE = Color3.fromRGB(180, 60, 255)
+local PANEL2 = Color3.fromRGB(30, 18, 45)
+local WHITE = Color3.fromRGB(240, 235, 250)
+local GREEN = Color3.fromRGB(70, 255, 150)
+local RED = Color3.fromRGB(255, 70, 90)
+local YELLOW = Color3.fromRGB(255, 210, 70)
+
+--==================================================
+-- CONFIG FILE (salvar/carregar configs)
+--==================================================
+
+local CONFIG_FILE = "NexusFPSBooster_config.json"
+
+local function SaveConfig(data)
+	pcall(function()
+		if writefile then
+			writefile(CONFIG_FILE, HttpService:JSONEncode(data))
+		end
+	end)
+end
+
+local function LoadConfig()
+	local ok, result = pcall(function()
+		if isfile and isfile(CONFIG_FILE) and readfile then
+			return HttpService:JSONDecode(readfile(CONFIG_FILE))
+		end
+		return nil
+	end)
+	if ok then return result end
+	return nil
+end
+
+--==================================================
+-- STATE
+--==================================================
+
+local BoosterEnabled = false
+local CurrentMode = "LOW"
+local AntiLagEnabled = false
+local SoundsOff = false
+local EssentialOnly = false
+local Minimized = false
+
+local SavedConfig = LoadConfig()
+if SavedConfig then
+	CurrentMode = SavedConfig.CurrentMode or CurrentMode
+	AntiLagEnabled = SavedConfig.AntiLagEnabled or false
+	SoundsOff = SavedConfig.SoundsOff or false
+	EssentialOnly = SavedConfig.EssentialOnly or false
+end
+
+local function PersistConfig()
+	SaveConfig({
+		CurrentMode = CurrentMode,
+		AntiLagEnabled = AntiLagEnabled,
+		SoundsOff = SoundsOff,
+		EssentialOnly = EssentialOnly
+	})
+end
+
+--==================================================
+-- MODES
+--==================================================
+
+local Modes = {
+	LOW = { Textures = true, Decals = true, Particles = true, Effects = true, Shadows = true, Materials = true },
+	MEDIUM = { Textures = false, Decals = false, Particles = false, Effects = true, Shadows = false, Materials = true },
+	HIGH = { Textures = false, Decals = false, Particles = false, Effects = false, Shadows = false, Materials = true },
+	ULTRA = { Textures = false, Decals = false, Particles = false, Effects = false, Shadows = false, Materials = false },
+	BATATA = { Textures = false, Decals = false, Particles = false, Effects = false, Shadows = false, Materials = false, Extreme = true }
+}
+
+--==================================================
+-- BACKUP / RESTORE
+--==================================================
+
+local Backup = {}
+local BackupCreated = false
+local OriginalStreamingRadius, OriginalStreamingMinRadius
+
+pcall(function()
+	OriginalStreamingRadius = Workspace.StreamingTargetRadius
+	OriginalStreamingMinRadius = Workspace.StreamingMinRadius
+end)
+
+local function SaveOriginal(obj)
+	if Backup[obj] then return end
+	local data = {}
+
+	if obj:IsA("BasePart") then
+		data.Material = obj.Material
+		data.CastShadow = obj.CastShadow
+	end
+	if obj:IsA("Texture") or obj:IsA("Decal") then
+		data.Transparency = obj.Transparency
+	end
+	if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
+		or obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles") then
+		data.Enabled = obj.Enabled
+	end
+	if obj:IsA("PostEffect") then
+		data.Enabled = obj.Enabled
+	end
+	if obj:IsA("Sound") then
+		data.Volume = obj.Volume
+	end
+
+	Backup[obj] = data
+end
+
+local function CreateBackup()
+	if BackupCreated then return end
+	for _, obj in ipairs(Workspace:GetDescendants()) do SaveOriginal(obj) end
+	for _, obj in ipairs(Lighting:GetChildren()) do SaveOriginal(obj) end
+	BackupCreated = true
+end
+
+local function RestoreGraphics()
+	for obj, data in pairs(Backup) do
+		if obj and obj.Parent then
+			if obj:IsA("BasePart") then
+				if data.Material then obj.Material = data.Material end
+				if data.CastShadow ~= nil then obj.CastShadow = data.CastShadow end
+			end
+			if (obj:IsA("Texture") or obj:IsA("Decal")) and data.Transparency ~= nil then
+				obj.Transparency = data.Transparency
+			end
+			if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
+				or obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles") then
+				if data.Enabled ~= nil then obj.Enabled = data.Enabled end
+			end
+			if obj:IsA("PostEffect") and data.Enabled ~= nil then
+				obj.Enabled = data.Enabled
+			end
+		end
+	end
+	Lighting.GlobalShadows = true
+	BoosterEnabled = false
+end
+
+--==================================================
+-- BOOST
+--==================================================
+
+local function ApplyBoost()
+	CreateBackup()
+	local Config = Modes[CurrentMode]
+
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		if obj:IsA("Texture") then
+			if not Config.Textures then obj.Transparency = 1 end
+		elseif obj:IsA("Decal") then
+			if not Config.Decals then obj.Transparency = 1 end
+		elseif obj:IsA("SurfaceAppearance") then
+			if Config.Extreme then obj.Parent = nil end
+		elseif obj:IsA("BasePart") then
+			if not Config.Shadows then obj.CastShadow = false end
+			if not Config.Materials then obj.Material = Enum.Material.SmoothPlastic end
+		elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam")
+			or obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles") then
+			if not Config.Particles then obj.Enabled = false end
+		end
+	end
+
+	if not Config.Effects then
+		for _, obj in ipairs(Lighting:GetChildren()) do
+			if obj:IsA("PostEffect") then obj.Enabled = false end
+		end
+	end
+
+	if not Config.Shadows then
+		Lighting.GlobalShadows = false
+	end
+end
+
+--==================================================
+-- ANTI-LAG (reduz distância de renderização)
+--==================================================
+
+local function ApplyAntiLag(state)
+	pcall(function()
+		if state then
+			Workspace.StreamingEnabled = true
+			Workspace.StreamingTargetRadius = 96
+			Workspace.StreamingMinRadius = 48
+		else
+			if OriginalStreamingRadius then
+				Workspace.StreamingTargetRadius = OriginalStreamingRadius
+			end
+			if OriginalStreamingMinRadius then
+				Workspace.StreamingMinRadius = OriginalStreamingMinRadius
+			end
+		end
+	end)
+end
+
+--==================================================
+-- SONS (mute geral)
+--==================================================
+
+local SoundConnection
+
+local function MuteAllSounds()
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		if obj:IsA("Sound") then
+			SaveOriginal(obj)
+			obj.Volume = 0
+		end
+	end
+	pcall(function() SoundService.AmbientReverb = Enum.ReverbType.NoReverb end)
+end
+
+local function UnmuteAllSounds()
+	for obj, data in pairs(Backup) do
+		if obj and obj.Parent and obj:IsA("Sound") and data.Volume ~= nil then
+			obj.Volume = data.Volume
+		end
+	end
+end
+
+local function ApplySoundsOff(state)
+	if state then
+		MuteAllSounds()
+		if SoundConnection then SoundConnection:Disconnect() end
+		SoundConnection = Workspace.DescendantAdded:Connect(function(obj)
+			if obj:IsA("Sound") then
+				task.wait()
+				pcall(function() obj.Volume = 0 end)
+			end
+		end)
+	else
+		if SoundConnection then
+			SoundConnection:Disconnect()
+			SoundConnection = nil
+		end
+		UnmuteAllSounds()
+	end
+end
+
+--==================================================
+-- MODO SÓ O ESSENCIAL (esconde HUD/Chat/Backpack)
+--==================================================
+
+local function ApplyEssentialOnly(state)
+	pcall(function()
+		if state then
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, false)
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, false)
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.EmotesMenu, false)
+		else
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, true)
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, true)
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, true)
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.EmotesMenu, true)
+		end
+	end)
+end
+
+--==================================================
+-- RAM CLEANER
+--==================================================
+
+local function CleanRAM()
+	local before = collectgarbage("count")
+	collectgarbage("collect")
+	local after = collectgarbage("count")
+	return math.max(before - after, 0)
+end
+
+--==================================================
+-- GUI BASE
+--==================================================
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "NexusFPSBoosterV4"
+Gui.ResetOnSpawn = false
+Gui.IgnoreGuiInset = true
+Gui.Parent = Player:WaitForChild("PlayerGui")
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.fromOffset(500, 460)
+Main.Position = UDim2.new(0.5, -250, 0.5, -230)
+Main.BackgroundColor3 = Color3.fromRGB(15, 8, 22)
+Main.BackgroundTransparency = 0.25
+Main.BorderSizePixel = 0
+Main.ClipsDescendants = true
+Main.Parent = Gui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 16)
+MainCorner.Parent = Main
+
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = PURPLE
+MainStroke.Thickness = 2
+MainStroke.Transparency = 0.1
+MainStroke.Parent = Main
+
+--==================================================
+-- TOP BAR + MINIMIZE
+--==================================================
+
+local Top = Instance.new("Frame")
+Top.Size = UDim2.new(1, 0, 0, 50)
+Top.BackgroundTransparency = 1
+Top.Parent = Main
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -80, 1, 0)
+Title.Position = UDim2.fromOffset(15, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "N E X U S  //  FPS BOOSTER"
+Title.TextColor3 = WHITE
+Title.TextSize = 17
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Top
+
+local MinimizeButton = Instance.new("TextButton")
+MinimizeButton.Size = UDim2.fromOffset(34, 34)
+MinimizeButton.Position = UDim2.new(1, -44, 0, 8)
+MinimizeButton.BackgroundColor3 = PANEL2
+MinimizeButton.Text = "—"
+MinimizeButton.TextColor3 = WHITE
+MinimizeButton.TextSize = 16
+MinimizeButton.Font = Enum.Font.GothamBold
+MinimizeButton.AutoButtonColor = false
+MinimizeButton.Parent = Top
+
+local MinimizeCorner = Instance.new("UICorner")
+MinimizeCorner.CornerRadius = UDim.new(0, 8)
+MinimizeCorner.Parent = MinimizeButton
+
+--==================================================
+-- TABS
+--==================================================
+
+local BoostTab = Instance.new("TextButton")
+BoostTab.Size = UDim2.fromOffset(150, 32)
+BoostTab.Position = UDim2.fromOffset(15, 55)
+BoostTab.BackgroundColor3 = PURPLE
+BoostTab.Text = "BOOST"
+BoostTab.TextColor3 = WHITE
+BoostTab.Font = Enum.Font.GothamBold
+BoostTab.TextSize = 12
+BoostTab.AutoButtonColor = false
+BoostTab.Parent = Main
+
+local BoostTabCorner = Instance.new("UICorner")
+BoostTabCorner.CornerRadius = UDim.new(0, 8)
+BoostTabCorner.Parent = BoostTab
+
+local InfoTab = Instance.new("TextButton")
+InfoTab.Size = UDim2.fromOffset(150, 32)
+InfoTab.Position = UDim2.fromOffset(175, 55)
+InfoTab.BackgroundColor3 = PANEL2
+InfoTab.Text = "INFO"
+InfoTab.TextColor3 = WHITE
+InfoTab.Font = Enum.Font.GothamBold
+InfoTab.TextSize = 12
+InfoTab.AutoButtonColor = false
+InfoTab.Parent = Main
+
+local InfoTabCorner = Instance.new("UICorner")
+InfoTabCorner.CornerRadius = UDim.new(0, 8)
+InfoTabCorner.Parent = InfoTab
+
+--==================================================
+-- BOOST PAGE
+--==================================================
+
+local BoostPage = Instance.new("Frame")
+BoostPage.Size = UDim2.new(1, -30, 1, -100)
+BoostPage.Position = UDim2.fromOffset(15, 98)
+BoostPage.BackgroundTransparency = 1
+BoostPage.Parent = Main
+
+local Status = Instance.new("TextLabel")
+Status.Size = UDim2.new(0.6, 0, 0, 26)
+Status.BackgroundTransparency = 1
+Status.Text = "●  BOOST DISABLED"
+Status.TextColor3 = RED
+Status.TextSize = 14
+Status.Font = Enum.Font.GothamBold
+Status.TextXAlignment = Enum.TextXAlignment.Left
+Status.Parent = BoostPage
+
+local Toggle = Instance.new("TextButton")
+Toggle.Size = UDim2.fromOffset(110, 44)
+Toggle.Position = UDim2.new(1, -110, 0, 0)
+Toggle.BackgroundColor3 = PANEL2
+Toggle.Text = "OFF"
+Toggle.TextColor3 = RED
+Toggle.TextSize = 15
+Toggle.Font = Enum.Font.GothamBold
+Toggle.AutoButtonColor = false
+Toggle.Parent = BoostPage
+
+local ToggleCorner = Instance.new("UICorner")
+ToggleCorner.CornerRadius = UDim.new(0, 8)
+ToggleCorner.Parent = Toggle
+
+local ToggleStroke = Instance.new("UIStroke")
+ToggleStroke.Color = PURPLE
+ToggleStroke.Thickness = 1.5
+ToggleStroke.Parent = Toggle
+
+local ModeTitle = Instance.new("TextLabel")
+ModeTitle.Size = UDim2.new(1, 0, 0, 20)
+ModeTitle.Position = UDim2.fromOffset(0, 55)
+ModeTitle.BackgroundTransparency = 1
+ModeTitle.Text = "OPTIMIZATION MODE"
+ModeTitle.TextColor3 = PURPLE
+ModeTitle.TextSize = 11
+ModeTitle.Font = Enum.Font.GothamBold
+ModeTitle.TextXAlignment = Enum.TextXAlignment.Left
+ModeTitle.Parent = BoostPage
+
+local ModeContainer = Instance.new("Frame")
+ModeContainer.Size = UDim2.new(1, 0, 0, 40)
+ModeContainer.Position = UDim2.fromOffset(0, 78)
+ModeContainer.BackgroundTransparency = 1
+ModeContainer.Parent = BoostPage
+
+local ModeNames = {"LOW", "MEDIUM", "HIGH", "ULTRA", "BATATA"}
+local ModeButtons = {}
+
+for i, ModeName in ipairs(ModeNames) do
+	local Button = Instance.new("TextButton")
+	Button.Size = UDim2.new(0.19, 0, 1, 0)
+	Button.Position = UDim2.new((i - 1) * 0.205, 0, 0, 0)
+	Button.BackgroundColor3 = ModeName == CurrentMode and PURPLE or PANEL2
+	Button.Text = ModeName
+	Button.TextColor3 = WHITE
+	Button.TextSize = 9
+	Button.Font = Enum.Font.GothamBold
+	Button.AutoButtonColor = false
+	Button.Parent = ModeContainer
+
+	local Corner = Instance.new("UICorner")
+	Corner.CornerRadius = UDim.new(0, 7)
+	Corner.Parent = Button
+
+	local Stroke = Instance.new("UIStroke")
+	Stroke.Color = PURPLE
+	Stroke.Thickness = 1
+	Stroke.Transparency = ModeName == CurrentMode and 0 or 0.5
+	Stroke.Parent = Button
+
+	ModeButtons[ModeName] = Button
+end
+
+local CurrentModeLabel = Instance.new("TextLabel")
+CurrentModeLabel.Size = UDim2.new(1, 0, 0, 20)
+CurrentModeLabel.Position = UDim2.fromOffset(0, 122)
+CurrentModeLabel.BackgroundTransparency = 1
+CurrentModeLabel.Text = "MODE: " .. CurrentMode
+CurrentModeLabel.TextColor3 = WHITE
+CurrentModeLabel.TextSize = 12
+CurrentModeLabel.Font = Enum.Font.GothamMedium
+CurrentModeLabel.TextXAlignment = Enum.TextXAlignment.Left
+CurrentModeLabel.Parent = BoostPage
+
+--==================================================
+-- EXTRAS: ANTI-LAG / SONS / SÓ ESSENCIAL
+--==================================================
+
+local ExtrasTitle = Instance.new("TextLabel")
+ExtrasTitle.Size = UDim2.new(1, 0, 0, 18)
+ExtrasTitle.Position = UDim2.fromOffset(0, 150)
+ExtrasTitle.BackgroundTransparency = 1
+ExtrasTitle.Text = "EXTRAS"
+ExtrasTitle.TextColor3 = PURPLE
+ExtrasTitle.TextSize = 11
+ExtrasTitle.Font = Enum.Font.GothamBold
+ExtrasTitle.TextXAlignment = Enum.TextXAlignment.Left
+ExtrasTitle.Parent = BoostPage
+
+local function CreateExtraToggle(name, posY, initialState)
+	local Btn = Instance.new("TextButton")
+	Btn.Size = UDim2.new(1, 0, 0, 32)
+	Btn.Position = UDim2.fromOffset(0, posY)
+	Btn.BackgroundColor3 = initialState and Color3.fromRGB(15, 45, 30) or PANEL2
+	Btn.Text = ""
+	Btn.AutoButtonColor = false
+	Btn.Parent = BoostPage
+
+	local Corner = Instance.new("UICorner")
+	Corner.CornerRadius = UDim.new(0, 7)
+	Corner.Parent = Btn
+
+	local Stroke = Instance.new("UIStroke")
+	Stroke.Color = PURPLE
+	Stroke.Thickness = 1
+	Stroke.Parent = Btn
+
+	local Label = Instance.new("TextLabel")
+	Label.Size = UDim2.new(1, -70, 1, 0)
+	Label.Position = UDim2.fromOffset(12, 0)
+	Label.BackgroundTransparency = 1
+	Label.Text = name
+	Label.TextColor3 = WHITE
+	Label.TextSize = 12
+	Label.Font = Enum.Font.GothamMedium
+	Label.TextXAlignment = Enum.TextXAlignment.Left
+	Label.Parent = Btn
+
+	local StateLabel = Instance.new("TextLabel")
+	StateLabel.Size = UDim2.fromOffset(50, 32)
+	StateLabel.Position = UDim2.new(1, -60, 0, 0)
+	StateLabel.BackgroundTransparency = 1
+	StateLabel.Text = initialState and "ON" or "OFF"
+	StateLabel.TextColor3 = initialState and GREEN or RED
+	StateLabel.TextSize = 12
+	StateLabel.Font = Enum.Font.GothamBold
+	StateLabel.TextXAlignment = Enum.TextXAlignment.Right
+	StateLabel.Parent = Btn
+
+	return Btn, StateLabel
+end
+
+local AntiLagBtn, AntiLagState = CreateExtraToggle("ANTI-LAG", 172, AntiLagEnabled)
+local SoundsBtn, SoundsState = CreateExtraToggle("DESLIGAR SONS", 208, SoundsOff)
+local EssentialBtn, EssentialState = CreateExtraToggle("SÓ O ESSENCIAL (HUD)", 244, EssentialOnly)
+
+local Restore = Instance.new("TextButton")
+Restore.Size = UDim2.new(0.485, 0, 0, 34)
+Restore.Position = UDim2.fromOffset(0, 286)
+Restore.BackgroundColor3 = PANEL2
+Restore.Text = "↻  RESTORE"
+Restore.TextColor3 = WHITE
+Restore.TextSize = 11
+Restore.Font = Enum.Font.GothamBold
+Restore.AutoButtonColor = false
+Restore.Parent = BoostPage
+
+local RestoreCorner = Instance.new("UICorner")
+RestoreCorner.CornerRadius = UDim.new(0, 7)
+RestoreCorner.Parent = Restore
+
+local RestoreStroke = Instance.new("UIStroke")
+RestoreStroke.Color = PURPLE
+RestoreStroke.Thickness = 1
+RestoreStroke.Parent = Restore
+
+local CleanButton = Instance.new("TextButton")
+CleanButton.Size = UDim2.new(0.485, 0, 0, 34)
+CleanButton.Position = UDim2.new(0.515, 0, 0, 286)
+CleanButton.BackgroundColor3 = PANEL2
+CleanButton.Text = "🧹  LIMPAR RAM"
+CleanButton.TextColor3 = WHITE
+CleanButton.TextSize = 11
+CleanButton.Font = Enum.Font.GothamBold
+CleanButton.AutoButtonColor = false
+CleanButton.Parent = BoostPage
+
+local CleanButtonCorner = Instance.new("UICorner")
+CleanButtonCorner.CornerRadius = UDim.new(0, 7)
+CleanButtonCorner.Parent = CleanButton
+
+local CleanButtonStroke = Instance.new("UIStroke")
+CleanButtonStroke.Color = PURPLE
+CleanButtonStroke.Thickness = 1
+CleanButtonStroke.Parent = CleanButton
+
+local CleanResultLabel = Instance.new("TextLabel")
+CleanResultLabel.Size = UDim2.new(1, 0, 0, 20)
+CleanResultLabel.Position = UDim2.fromOffset(0, 326)
+CleanResultLabel.BackgroundTransparency = 1
+CleanResultLabel.Text = ""
+CleanResultLabel.TextColor3 = YELLOW
+CleanResultLabel.TextSize = 11
+CleanResultLabel.Font = Enum.Font.GothamMedium
+CleanResultLabel.TextXAlignment = Enum.TextXAlignment.Left
+CleanResultLabel.Parent = BoostPage
+
+--==================================================
+-- INFO PAGE
+--==================================================
+
+local InfoPage = Instance.new("Frame")
+InfoPage.Size = BoostPage.Size
+InfoPage.Position = BoostPage.Position
+InfoPage.BackgroundTransparency = 1
+InfoPage.Visible = false
+InfoPage.Parent = Main
+
+local StatsText = Instance.new("TextLabel")
+StatsText.Size = UDim2.new(1, 0, 0, 150)
+StatsText.BackgroundTransparency = 1
+StatsText.TextColor3 = WHITE
+StatsText.TextSize = 13
+StatsText.Font = Enum.Font.Code
+StatsText.TextXAlignment = Enum.TextXAlignment.Left
+StatsText.TextYAlignment = Enum.TextYAlignment.Top
+StatsText.Text = "N E X U S  //  INFO"
+StatsText.Parent = InfoPage
+
+local GraphTitle = Instance.new("TextLabel")
+GraphTitle.Size = UDim2.new(1, 0, 0, 18)
+GraphTitle.Position = UDim2.fromOffset(0, 155)
+GraphTitle.BackgroundTransparency = 1
+GraphTitle.Text = "FPS (últimos 40s)"
+GraphTitle.TextColor3 = PURPLE
+GraphTitle.TextSize = 11
+GraphTitle.Font = Enum.Font.GothamBold
+GraphTitle.TextXAlignment = Enum.TextXAlignment.Left
+GraphTitle.Parent = InfoPage
+
+local GraphContainer = Instance.new("Frame")
+GraphContainer.Size = UDim2.new(1, 0, 0, 110)
+GraphContainer.Position = UDim2.fromOffset(0, 176)
+GraphContainer.BackgroundColor3 = PANEL2
+GraphContainer.BackgroundTransparency = 0.3
+GraphContainer.Parent = InfoPage
+
+local GraphCorner = Instance.new("UICorner")
+GraphCorner.CornerRadius = UDim.new(0, 8)
+GraphCorner.Parent = GraphContainer
+
+local GraphStroke = Instance.new("UIStroke")
+GraphStroke.Color = PURPLE
+GraphStroke.Thickness = 1
+GraphStroke.Transparency = 0.4
+GraphStroke.Parent = GraphContainer
+
+local GraphLayout = Instance.new("UIListLayout")
+GraphLayout.FillDirection = Enum.FillDirection.Horizontal
+GraphLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+GraphLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+GraphLayout.Padding = UDim.new(0, 2)
+GraphLayout.Parent = GraphContainer
+
+local MAX_BARS = 40
+local FPSHistory = {}
+local Bars = {}
+
+for i = 1, MAX_BARS do
+	local Bar = Instance.new("Frame")
+	Bar.Size = UDim2.new(0, 9, 0, 2)
+	Bar.BackgroundColor3 = PURPLE
+	Bar.BorderSizePixel = 0
+	Bar.LayoutOrder = i
+	Bar.Parent = GraphContainer
+
+	local BarCorner = Instance.new("UICorner")
+	BarCorner.CornerRadius = UDim.new(0, 2)
+	BarCorner.Parent = Bar
+
+	Bars[i] = Bar
+end
+
+--==================================================
+-- TOGGLE / MODE / EXTRAS / RESTORE LOGIC
+--==================================================
+
+local function UpdateToggle()
+	if BoosterEnabled then
+		Toggle.Text = "ON"
+		Toggle.TextColor3 = GREEN
+		Status.Text = "●  BOOST ACTIVE"
+		Status.TextColor3 = GREEN
+		ApplyBoost()
+	else
+		Toggle.Text = "OFF"
+		Toggle.TextColor3 = RED
+		Status.Text = "●  BOOST DISABLED"
+		Status.TextColor3 = RED
+		RestoreGraphics()
+	end
+end
+
+Toggle.MouseButton1Click:Connect(function()
+	BoosterEnabled = not BoosterEnabled
+	TweenService:Create(
+		Toggle, TweenInfo.new(0.2, Enum.EasingStyle.Quad),
+		{ BackgroundColor3 = BoosterEnabled and Color3.fromRGB(15, 45, 30) or PANEL2 }
+	):Play()
+	UpdateToggle()
+end)
+
+for ModeName, Button in pairs(ModeButtons) do
+	Button.MouseButton1Click:Connect(function()
+		CurrentMode = ModeName
+		CurrentModeLabel.Text = "MODE: " .. ModeName
+		PersistConfig()
+
+		for Name, OtherButton in pairs(ModeButtons) do
+			TweenService:Create(
+				OtherButton, TweenInfo.new(0.2),
+				{ BackgroundColor3 = Name == CurrentMode and PURPLE or PANEL2 }
+			):Play()
+		end
+
+		if BoosterEnabled then ApplyBoost() end
+	end)
+end
+
+Restore.MouseButton1Click:Connect(function()
+	RestoreGraphics()
+	Status.Text = "●  GRAPHICS RESTORED"
+	Status.TextColor3 = YELLOW
+
+	task.delay(2, function()
+		if not BoosterEnabled then
+			Status.Text = "●  BOOST DISABLED"
+			Status.TextColor3 = RED
+		end
+	end)
+
+	Toggle.Text = "OFF"
+	Toggle.TextColor3 = RED
+	Toggle.BackgroundColor3 = PANEL2
+end)
+
+CleanButton.MouseButton1Click:Connect(function()
+	local freed = CleanRAM()
+	CleanResultLabel.Text = string.format("Liberado: %.1f MB", freed / 1024)
+	task.delay(3, function() CleanResultLabel.Text = "" end)
+end)
+
+AntiLagBtn.MouseButton1Click:Connect(function()
+	AntiLagEnabled = not AntiLagEnabled
+	ApplyAntiLag(AntiLagEnabled)
+	AntiLagBtn.BackgroundColor3 = AntiLagEnabled and Color3.fromRGB(15, 45, 30) or PANEL2
+	AntiLagState.Text = AntiLagEnabled and "ON" or "OFF"
+	AntiLagState.TextColor3 = AntiLagEnabled and GREEN or RED
+	PersistConfig()
+end)
+
+SoundsBtn.MouseButton1Click:Connect(function()
+	SoundsOff = not SoundsOff
+	ApplySoundsOff(SoundsOff)
+	SoundsBtn.BackgroundColor3 = SoundsOff and Color3.fromRGB(15, 45, 30) or PANEL2
+	SoundsState.Text = SoundsOff and "ON" or "OFF"
+	SoundsState.TextColor3 = SoundsOff and GREEN or RED
+	PersistConfig()
+end)
+
+EssentialBtn.MouseButton1Click:Connect(function()
+	EssentialOnly = not EssentialOnly
+	ApplyEssentialOnly(EssentialOnly)
+	EssentialBtn.BackgroundColor3 = EssentialOnly and Color3.fromRGB(15, 45, 30) or PANEL2
+	EssentialState.Text = EssentialOnly and "ON" or "OFF"
+	EssentialState.TextColor3 = EssentialOnly and GREEN or RED
+	PersistConfig()
+end)
+
+-- aplica configs salvas ao iniciar
+if AntiLagEnabled then ApplyAntiLag(true) end
+if SoundsOff then ApplySoundsOff(true) end
+if EssentialOnly then ApplyEssentialOnly(true) end
+
+--==================================================
+-- TABS SWITCH
+--==================================================
+
+BoostTab.MouseButton1Click:Connect(function()
+	BoostPage.Visible = true
+	InfoPage.Visible = false
+	BoostTab.BackgroundColor3 = PURPLE
+	InfoTab.BackgroundColor3 = PANEL2
+end)
+
+InfoTab.MouseButton1Click:Connect(function()
+	BoostPage.Visible = false
+	InfoPage.Visible = true
+	InfoTab.BackgroundColor3 = PURPLE
+	BoostTab.BackgroundColor3 = PANEL2
+end)
+
+--==================================================
+-- MINIMIZAR
+--==================================================
+
+local FullSize = Main.Size
+local MiniSize = UDim2.fromOffset(500, 50)
+
+MinimizeButton.MouseButton1Click:Connect(function()
+	Minimized = not Minimized
+
+	TweenService:Create(
+		Main, TweenInfo.new(0.25, Enum.EasingStyle.Quad),
+		{ Size = Minimized and MiniSize or FullSize }
+	):Play()
+
+	BoostTab.Visible = not Minimized
+	InfoTab.Visible = not Minimized
+	BoostPage.Visible = not Minimized and BoostPage.Visible
+	InfoPage.Visible = not Minimized and InfoPage.Visible
+
+	MinimizeButton.Text = Minimized and "▢" or "—"
+end)
+
+--==================================================
+-- DRAGGING
+--==================================================
+
+local Dragging = false
+local DragStart
+local StartPosition
+
+Top.InputBegan:Connect(function(Input)
+	if Input.UserInputType == Enum.UserInputType.MouseButton1
+		or Input.UserInputType == Enum.UserInputType.Touch then
+		Dragging = true
+		DragStart = Input.Position
+		StartPosition = Main.Position
+
+		Input.Changed:Connect(function()
+			if Input.UserInputState == Enum.UserInputState.End then
+				Dragging = false
+			end
+		end)
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(Input)
+	if not Dragging then return end
+	if Input.UserInputType ~= Enum.UserInputType.MouseMovement
+		and Input.UserInputType ~= Enum.UserInputType.Touch then
+		return
+	end
+
+	local Delta = Input.Position - DragStart
+	Main.Position = UDim2.new(
+		StartPosition.X.Scale, StartPosition.X.Offset + Delta.X,
+		StartPosition.Y.Scale, StartPosition.Y.Offset + Delta.Y
+	)
+end)
+
+--==================================================
+-- FPS / PING / MEMORY / GRAPH
+--==================================================
+
+local Frames = 0
+local LastFPSUpdate = os.clock()
+local FPS = 0
+local SessionStart = os.clock()
+
+local PingSamples = {}
+local PingMin, PingMax = math.huge, 0
+
+RunService.RenderStepped:Connect(function()
+	Frames += 1
+	local Now = os.clock()
+
+	if Now - LastFPSUpdate >= 1 then
+		FPS = Frames
+		Frames = 0
+		LastFPSUpdate = Now
+
+		local Ping = 0
+		pcall(function()
+			Ping = math.floor(Player:GetNetworkPing() * 1000)
+		end)
+
+		table.insert(PingSamples, Ping)
+		if #PingSamples > 60 then table.remove(PingSamples, 1) end
+		PingMin = math.min(PingMin, Ping)
+		PingMax = math.max(PingMax, Ping)
+
+		local PingSum = 0
+		for _, p in ipairs(PingSamples) do PingSum += p end
+		local PingAvg = #PingSamples > 0 and math.floor(PingSum / #PingSamples) or 0
+
+		local InstanceCount = #Workspace:GetDescendants()
+
+		local MemoryMB = "N/A"
+		pcall(function()
+			MemoryMB = string.format("%.1f MB", Stats:GetTotalMemoryUsageMb())
+		end)
+
+		local LuaMemoryMB = string.format("%.2f MB", collectgarbage("count") / 1024)
+
+		local Uptime = os.clock() - SessionStart
+		local UptimeStr = string.format("%02d:%02d", math.floor(Uptime / 60), math.floor(Uptime % 60))
+
+		StatsText.Text =
+			"N E X U S  //  INFO\n\n" ..
+			"FPS           : " .. FPS .. "\n" ..
+			"PING (atual)  : " .. Ping .. " ms\n" ..
+			"PING (média)  : " .. PingAvg .. " ms\n" ..
+			"PING (min/max): " .. (PingMin == math.huge and 0 or PingMin) .. " / " .. PingMax .. " ms\n\n" ..
+			"MEMÓRIA (RAM) : " .. MemoryMB .. "\n" ..
+			"MEMÓRIA LUA   : " .. LuaMemoryMB .. "\n" ..
+			"INSTÂNCIAS    : " .. InstanceCount .. "\n\n" ..
+			"BOOST         : " .. (BoosterEnabled and "ATIVO (" .. CurrentMode .. ")" or "DESATIVADO") .. "\n" ..
+			"TEMPO DE SESSÃO: " .. UptimeStr
+
+		-- atualiza gráfico
+		table.insert(FPSHistory, FPS)
+		if #FPSHistory > MAX_BARS then table.remove(FPSHistory, 1) end
+
+		local maxFPS = 1
+		for _, v in ipairs(FPSHistory) do maxFPS = math.max(maxFPS, v) end
+
+		for i = 1, MAX_BARS do
+			local value = FPSHistory[i - (MAX_BARS - #FPSHistory)] 
+			local bar = Bars[i]
+			if value then
+				local height = math.clamp((value / maxFPS) * 100, 2, 100)
+				bar.Size = UDim2.new(0, 9, 0, height)
+				bar.BackgroundColor3 = value < 20 and RED or (value < 40 and YELLOW or PURPLE)
+			else
+				bar.Size = UDim2.new(0, 9, 0, 2)
+			end
+		end
+	end
+end)
+
+--==================================================
+-- NEON ANIMATION
+--==================================================
+
+task.spawn(function()
+	while Gui.Parent do
+		TweenService:Create(
+			MainStroke, TweenInfo.new(1.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+			{ Transparency = 0.45 }
+		):Play()
+		task.wait(1.4)
+
+		TweenService:Create(
+			MainStroke, TweenInfo.new(1.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+			{ Transparency = 0.05 }
+		):Play()
+		task.wait(1.4)
+	end
+end)
+
+print("NEXUS FPS BOOSTER V4 iniciado.")
